@@ -52,8 +52,7 @@ void ASofaVisualMesh::BeginPlay()
     Super::BeginPlay();
     UE_LOG(SUnreal_log, Warning, TEXT("[SOFA] SofaVisualMesh::BeginPlay() called for '%s'"), *GetName());
     
-    // IMPORTANT: Clear the mesh pointer so we reconnect to the new API
-    // When Play starts, SofaContext recreates its API, invalidating our old pointer
+    // Clear the mesh pointer so we reconnect to the new API
     if (m_sofaMesh != nullptr)
     {
         UE_LOG(SUnreal_log, Warning, TEXT("[SOFA] Clearing stale mesh pointer for '%s' - will reconnect to new API"), *MeshName);
@@ -108,7 +107,7 @@ void ASofaVisualMesh::Tick( float DeltaTime )
             if (SofaContextRef->isSceneLoaded())
             {
                 // Use actor name as mesh name if MeshName is empty
-                FString searchName = MeshName.IsEmpty() ? GetActorLabel() : MeshName;
+                FString searchName = MeshName.IsEmpty() ? GetName() : MeshName;
                 UE_LOG(SUnreal_log, Warning, TEXT("[SOFA] SofaVisualMesh::Tick - Looking for mesh '%s'"), *searchName);
                 
                 SofaPhysicsOutputMesh* sofaMesh = SofaContextRef->getOutputMeshByName(searchName);

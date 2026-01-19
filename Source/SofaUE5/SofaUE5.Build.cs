@@ -38,7 +38,10 @@ public class SofaUE5 : ModuleRules
 			new string[]
 			{
                 "CoreUObject",
-                "Engine"
+                "Engine",
+                "RenderCore",
+                "RHI",
+                "XmlParser"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

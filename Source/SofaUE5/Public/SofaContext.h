@@ -83,6 +83,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sofa Parameters")
         bool m_log = false;
 
+    // Floor Detection Parameters
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings", 
+        meta = (Tooltip = "Enable floor collision from Unreal static meshes named 'Floor' or 'Ground'"))
+        bool bEnableFloorCollision = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings",
+        meta = (Tooltip = "Stiffness of the floor PlaneForceField", EditCondition = "bEnableFloorCollision"))
+        float FloorStiffness = 100000.0f;
+
 protected:
     void catchSofaMessages();
 
@@ -95,6 +104,15 @@ protected:
 
     /** Check if there are existing SofaVisualMesh actors referencing this context */
     bool HasExistingVisualMeshes();
+
+    /** Detect floor height from Unreal static meshes in the scene */
+    float DetectFloorHeight();
+
+    /** Process scene file to inject or modify PlaneForceField for floor */
+    FString ProcessSceneForFloor(const FString& OriginalPath);
+
+    /** Find all SofaCollisionMesh actors and inject their geometry into the scene */
+    FString InjectCollisionMeshes(const FString& SceneContent);
 
 private:
     int32 m_dllLoadStatus;
