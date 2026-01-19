@@ -1,4 +1,6 @@
 # SofaUE5-Renderer
+EXTENDED FROM: https://github.com/InfinyTech3D/SofaUE5-Renderer 
+
 
 ## Description
 This is an **Unreal Engine 5.5 plugin** that renders SOFA physics simulations inside Unreal Engine. All SOFA `VisualModel` components in a loaded simulation are rendered as Unreal `Actors` with `ProceduralMeshComponent`. You can apply Unreal Materials to each visual model and combine UE5's rendering pipeline with SOFA's physics simulation.
