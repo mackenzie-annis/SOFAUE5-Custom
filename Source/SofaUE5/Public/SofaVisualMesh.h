@@ -47,6 +47,8 @@ public:
     
     virtual void Tick( float DeltaSeconds ) override;
 
+    virtual bool IsLevelBoundsRelevant() const override { return false; }
+
     void recomputeUV(const TArray<FVector>& vertices, TArray<FVector2D>& UV0);
     void computeBoundingBox(const TArray<FVector>& vertices);
 

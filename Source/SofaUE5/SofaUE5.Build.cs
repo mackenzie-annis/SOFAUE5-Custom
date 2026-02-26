@@ -41,8 +41,8 @@ public class SofaUE5 : ModuleRules
                 "Engine",
                 "RenderCore",
                 "RHI",
-                "XmlParser"
-				// ... add private dependencies that you statically link with here ...	
+                "XmlParser",
+                "Landscape"
 			}
 			);
 		

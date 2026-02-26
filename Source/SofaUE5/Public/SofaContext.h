@@ -28,6 +28,7 @@
 
 class SofaPhysicsAPI;
 class SofaPhysicsOutputMesh;
+class UStaticMeshComponent;
 
 UCLASS()
 class SOFAUE5_API ASofaContext : public AActor
@@ -35,23 +36,21 @@ class SOFAUE5_API ASofaContext : public AActor
     GENERATED_BODY()
 
 protected:
-    // Called when the game starts or when spawned
     virtual void BeginPlay() override;
-
     virtual void BeginDestroy() override;
 
 public:
-    // Sets default values for this actor's properties
     ASofaContext();
 
-
     virtual void PostActorCreated() override;
-    
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
+
+    virtual bool ShouldTickIfViewportsOnly() const override { return false; }
+    virtual bool IsLevelBoundsRelevant() const override { return false; }
 
     // Called every frame
     virtual void Tick( float DeltaSeconds ) override;
@@ -83,14 +82,26 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sofa Parameters")
         bool m_log = false;
 
-    // Floor Detection Parameters
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings", 
-        meta = (Tooltip = "Enable floor collision from Unreal static meshes named 'Floor' or 'Ground'"))
-        bool bEnableFloorCollision = true;
+    // Floor Detection
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings",
+        meta = (Tooltip = "Sample floor/terrain on a grid and inject as triangle collision. Works for flat or uneven ground. Name actors 'Floor' or 'Ground' (or add to substrings)."))
+        bool bAutoDetectFloor = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings",
-        meta = (Tooltip = "Stiffness of the floor PlaneForceField", EditCondition = "bEnableFloorCollision"))
-        float FloorStiffness = 100000.0f;
+        meta = (Tooltip = "Size of floor area to sample (cm). Centered on SofaContext.", EditCondition = "bAutoDetectFloor", ClampMin = "500.0", ClampMax = "50000.0"))
+        float FloorGridSize = 2000.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings",
+        meta = (Tooltip = "Grid divisions (higher = more detail). Landscapes: set Collision Mip Level to 0 (Details > Collision).", EditCondition = "bAutoDetectFloor", ClampMin = "2", ClampMax = "50"))
+        int32 FloorGridDivisions = 6;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Floor Settings",
+        meta = (Tooltip = "Actor or mesh name must contain one of these (case insensitive). Empty = floor, ground.", EditCondition = "bAutoDetectFloor"))
+        TArray<FString> FloorActorNameSubstrings;
+
+    UFUNCTION(BlueprintCallable, CallInEditor, Category = "Floor Settings",
+        meta = (Tooltip = "Delete processed scene and floor collision cache in Saved/SofaTemp. Use before debugging so the next Play regenerates them."))
+    void ClearSceneCache();
 
 protected:
     void catchSofaMessages();
@@ -105,8 +116,8 @@ protected:
     /** Check if there are existing SofaVisualMesh actors referencing this context */
     bool HasExistingVisualMeshes();
 
-    /** Detect floor height from Unreal static meshes in the scene */
-    float DetectFloorHeight();
+    /** Return true if actor (or its static mesh name) matches FloorActorNameSubstrings */
+    bool IsActorFloor(AActor* Actor, UStaticMeshComponent* MeshComp) const;
 
     /** Process scene file to inject or modify PlaneForceField for floor */
     FString ProcessSceneForFloor(const FString& OriginalPath);
@@ -114,15 +125,20 @@ protected:
     /** Find all SofaCollisionMesh actors and inject their geometry into the scene */
     FString InjectCollisionMeshes(const FString& SceneContent);
 
+    /** Extract floor mesh geometry within a radius and export to OBJ file */
+    FString ExportFloorCollisionMesh();
+
+    /** Generate SOFA XML for mesh-based floor collision */
+    FString GenerateFloorMeshCollisionXML(const FString& ObjFilePath);
+
 private:
     int32 m_dllLoadStatus;
     FString m_apiName;
-    UPROPERTY(SaveGame)
     bool m_isInit;
     
-    //UPROPERTY(SaveGame)
+    FString CachedFloorObjPath;
+    FVector CachedFloorLocation;
+    
     SofaPhysicsAPI* m_sofaAPI = nullptr;
-    //TSharedPtr<SofaAdvancePhysicsAPI> m_sofaAPI;
-    UPROPERTY(SaveGame)
-        int m_status;
+    int m_status;
 };

@@ -52,9 +52,17 @@ Once loaded, you should see the plugin folders in the Content Browser:
 
 ## Usage
 
+### Demo scenes
+| Map / scene | Description |
+|-------------|-------------|
+| `Demo_01_SimpleLiver` | Liver tetrahedral FEM |
+| `Demo_02_Caduceus` | Caduceus snake |
+| `Demo_03_Tissue` | Tissue sheet |
+| **`SofaScenes/sandbag.scn`** | **Single deformable beam fixed at one end** (see [Doc/Demo_04_Sandbag.md](Doc/Demo_04_Sandbag.md)) |
+
 ### Quick Start 
 1. **Place a SofaContext** actor in your level (drag from Place Actors panel → All Classes → SofaContext)
-2. **Set the File Path** property to your `.scn` file
+2. **Set the File Path** property to your `.scn` file (e.g. `Content/SofaScenes/sandbag.scn` for the sandbag demo)
 3. **Visual meshes spawn automatically** when the scene loads
 4. **Hit Play** to run the physics simulation
 

@@ -26,7 +26,6 @@
 #include "Engine.h"
 #include "CoreMinimal.h"
 #include "SofaVisualMesh.h"
-#include "SofaCollisionMesh.h"
 #include "Interfaces/IPluginManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/StaticMeshComponent.h"
@@ -36,6 +35,10 @@
 #include "Rendering/PositionVertexBuffer.h"
 #include "Misc/FileHelper.h"
 #include "XmlFile.h"
+#include "Landscape.h"
+#include "LandscapeProxy.h"
+#include "LandscapeComponent.h"
+#include "LandscapeHeightfieldCollisionComponent.h"
 #include <vector>
 #include <string>
 #include <regex>
@@ -61,8 +64,8 @@ ASofaContext::ASofaContext()
     PrimaryActorTick.bCanEverTick = true;
 
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("SofaContext"));
-    SetActorScale3D(FVector(-10.0, 10.0, 10.0));
-    SetActorRotation(FRotator(0.0, 0.0, 270.0));
+    SetActorScale3D(FVector(1.0, 1.0, 1.0));
+    SetActorRotation(FRotator(90.0, 0.0, 0.0));
 
     if (m_log)
         UE_LOG(SUnreal_log, Warning, TEXT("######### ASofaContext::ASofaContext(): %s | %s ##########"), *this->GetName(), *intToHexa(this->GetFlags()));
@@ -542,6 +545,13 @@ void ASofaContext::SpawnVisualMeshActors()
         return;
     }
 
+    // Only spawn during gameplay, not in editor (prevents WP serialization issues)
+    if (!World->IsGameWorld())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SOFA] Skipping auto-spawn in editor - use Play to spawn visual meshes"));
+        return;
+    }
+
     unsigned int numMeshes = m_sofaAPI->getNbOutputMeshes();
     UE_LOG(LogTemp, Warning, TEXT("[SOFA] Auto-spawning %d visual mesh actors..."), numMeshes);
 
@@ -557,10 +567,10 @@ void ASofaContext::SpawnVisualMeshActors()
         FString MeshNameStr(sofaMesh->getName());
         UE_LOG(LogTemp, Warning, TEXT("[SOFA] Spawning visual mesh for '%s'"), *MeshNameStr);
 
-        // Spawn the visual mesh actor
         FActorSpawnParameters SpawnParams;
         SpawnParams.Owner = this;
         SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        SpawnParams.bNoFail = true;
 
         ASofaVisualMesh* VisualMesh = World->SpawnActor<ASofaVisualMesh>(
             ASofaVisualMesh::StaticClass(), 
@@ -571,7 +581,6 @@ void ASofaContext::SpawnVisualMeshActors()
         
         if (VisualMesh)
         {
-            // Attach to this context and set up
             VisualMesh->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
             VisualMesh->SofaContextRef = this;
             VisualMesh->MeshName = MeshNameStr;
@@ -592,200 +601,127 @@ void ASofaContext::SpawnVisualMeshActors()
     UE_LOG(LogTemp, Warning, TEXT("[SOFA] Finished auto-spawning visual meshes"));
 }
 
-float ASofaContext::DetectFloorHeight()
+bool ASofaContext::IsActorFloor(AActor* Actor, UStaticMeshComponent* MeshComp) const
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    TArray<FString> Substrings = FloorActorNameSubstrings.Num() > 0
+        ? FloorActorNameSubstrings
+        : TArray<FString>{ TEXT("floor"), TEXT("ground") };
+
+    FString ActorNameLower = Actor->GetName().ToLower();
+    FString MeshNameLower;
+    if (MeshComp && MeshComp->GetStaticMesh())
     {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] No world available"));
-        return TNumericLimits<float>::Lowest();
+        MeshNameLower = MeshComp->GetStaticMesh()->GetName().ToLower();
     }
 
-    float DetectedFloorHeight = TNumericLimits<float>::Lowest();
-    bool bFoundFloor = false;
-
-    TArray<AActor*> StaticMeshActors;
-    UGameplayStatics::GetAllActorsOfClass(World, AStaticMeshActor::StaticClass(), StaticMeshActors);
-
-    for (AActor* Actor : StaticMeshActors)
+    for (const FString& Sub : Substrings)
     {
-        AStaticMeshActor* StaticMeshActor = Cast<AStaticMeshActor>(Actor);
-        if (!StaticMeshActor)
-            continue;
-
-        UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent();
-        if (!MeshComp || !MeshComp->GetStaticMesh())
-            continue;
-
-        FString MeshActorName = Actor->GetName().ToLower();
-        
-        // Check if name contains "floor" or "ground" (case insensitive)
-        bool bIsFloor = MeshActorName.Contains(TEXT("floor")) || 
-                        MeshActorName.Contains(TEXT("ground"));
-
-        if (!bIsFloor)
-            continue;
-
-        FBox Bounds = MeshComp->Bounds.GetBox();
-        float ActorTopZ = Bounds.Max.Z;
-        
-        // Calculate floor height relative to SofaContext position
-        FVector ContextLocation = GetActorLocation();
-        float RelativeZ = ActorTopZ - ContextLocation.Z;
-
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Found floor '%s' at world Z=%f, relative Z=%f"), 
-            *Actor->GetName(), ActorTopZ, RelativeZ);
-        
-        FVector ContextScale = GetActorScale3D();
-        float SofaFloorY = RelativeZ / FMath::Abs(ContextScale.Z);
-        
-        if (!bFoundFloor || SofaFloorY > DetectedFloorHeight)
-        {
-            DetectedFloorHeight = SofaFloorY;
-            bFoundFloor = true;
-        }
+        FString SubLower = Sub.TrimStartAndEnd().ToLower();
+        if (SubLower.IsEmpty()) continue;
+        if (ActorNameLower.Contains(SubLower) || MeshNameLower.Contains(SubLower))
+            return true;
     }
-
-    if (bFoundFloor)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Detected floor height: %f"), DetectedFloorHeight);
-        return DetectedFloorHeight;
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] No floor mesh found"));
-        return TNumericLimits<float>::Lowest();
-    }
+    return false;
 }
 
 FString ASofaContext::ProcessSceneForFloor(const FString& OriginalPath)
 {
-    if (!bEnableFloorCollision)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Floor collision disabled"));
+    if (!bAutoDetectFloor)
         return OriginalPath;
-    }
 
-    // Detect floor height from Unreal scene
-    float DetectedFloor = DetectFloorHeight();
-    bool bFloorDetected = (DetectedFloor > TNumericLimits<float>::Lowest() + 1.0f);
-
-    if (!bFloorDetected)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] No floor mesh found, using original scene"));
-        return OriginalPath;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Using floor height: %f"), DetectedFloor);
-
-    // Read the original scene file
     FString SceneContent;
     if (!FFileHelper::LoadFileToString(SceneContent, *OriginalPath))
-    {
-        UE_LOG(LogTemp, Error, TEXT("[SOFA Floor] Failed to read scene file: %s"), *OriginalPath);
         return OriginalPath;
-    }
 
     bool bModified = false;
 
-    // Check if PlaneForceField already exists in the scene
-    bool bHasPlaneForceField = SceneContent.Contains(TEXT("PlaneForceField"));
-
-    if (bHasPlaneForceField)
+    FString ObjPath = ExportFloorCollisionMesh();
+    if (!ObjPath.IsEmpty())
     {
-        // Modify existing PlaneForceField d values using simple string search
-        int32 SearchStart = 0;
+        FString FloorMeshXML = GenerateFloorMeshCollisionXML(ObjPath);
+        int32 LastNodeClose = SceneContent.Find(TEXT("</Node>"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+        if (LastNodeClose != INDEX_NONE)
+        {
+            SceneContent.InsertAt(LastNodeClose, FloorMeshXML);
+            bModified = true;
+            UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Injected grid-sampled floor collision"));
+        }
+
+        int32 ProxPos = SceneContent.Find(TEXT("MinProximityIntersection"));
+        if (ProxPos != INDEX_NONE)
+        {
+            int32 TagEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, ProxPos);
+            if (TagEnd != INDEX_NONE)
+            {
+                FString OldTag = SceneContent.Mid(ProxPos, TagEnd - ProxPos + 2);
+                FString NewTag = TEXT("MinProximityIntersection name=\"Proximity\" alarmDistance=\"3.0\" contactDistance=\"1.0\" />");
+                SceneContent = SceneContent.Replace(*OldTag, *NewTag);
+            }
+        }
+
+        if (SceneContent.Contains(TEXT("<DefaultAnimationLoop")))
+        {
+            SceneContent = SceneContent.Replace(
+                TEXT("<DefaultAnimationLoop />"),
+                TEXT("<FreeMotionAnimationLoop />\n    <GenericConstraintSolver maxIterations=\"30\" tolerance=\"1e-3\" />\n    <CollisionPipeline name=\"Pipeline\" />"));
+            SceneContent = SceneContent.Replace(
+                TEXT("<DefaultAnimationLoop/>"),
+                TEXT("<FreeMotionAnimationLoop />\n    <GenericConstraintSolver maxIterations=\"30\" tolerance=\"1e-3\" />\n    <CollisionPipeline name=\"Pipeline\" />"));
+        }
+
+        if (SceneContent.Contains(TEXT("<DefaultContactManager")))
+        {
+            int32 DCMPos = SceneContent.Find(TEXT("<DefaultContactManager"));
+            if (DCMPos != INDEX_NONE)
+            {
+                int32 TagEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, DCMPos);
+                if (TagEnd != INDEX_NONE)
+                {
+                    FString OldTag = SceneContent.Mid(DCMPos, TagEnd - DCMPos + 2);
+                    SceneContent = SceneContent.Replace(*OldTag, TEXT("<CollisionResponse name=\"ContactManager\" response=\"FrictionContactConstraint\" responseParams=\"mu=0.95\" />"));
+                }
+            }
+        }
+
+        if (SceneContent.Contains(TEXT("<MinProximityIntersection")))
+        {
+            int32 MPIPos = SceneContent.Find(TEXT("<MinProximityIntersection"));
+            if (MPIPos != INDEX_NONE)
+            {
+                int32 TagEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, MPIPos);
+                if (TagEnd != INDEX_NONE)
+                {
+                    FString OldTag = SceneContent.Mid(MPIPos, TagEnd - MPIPos + 2);
+                    SceneContent = SceneContent.Replace(*OldTag, TEXT("<NewProximityIntersection name=\"Intersection\" alarmDistance=\"3.0\" contactDistance=\"1.0\" />"));
+                }
+            }
+        }
+
+        int32 SearchPos = 0;
         while (true)
         {
-            int32 PlanePos = SceneContent.Find(TEXT("<PlaneForceField"), ESearchCase::IgnoreCase, ESearchDir::FromStart, SearchStart);
-            if (PlanePos == INDEX_NONE)
+            int32 FEMPos = SceneContent.Find(TEXT("TetrahedronFEMForceField"), ESearchCase::IgnoreCase, ESearchDir::FromStart, SearchPos);
+            if (FEMPos == INDEX_NONE)
                 break;
-            
-            // Find the end of this tag
-            int32 TagEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, PlanePos);
+            int32 TagEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FEMPos);
             if (TagEnd == INDEX_NONE)
             {
-                SearchStart = PlanePos + 16;
+                SearchPos = FEMPos + 20;
                 continue;
             }
-            
-            // Extract the tag content
-            FString TagContent = SceneContent.Mid(PlanePos, TagEnd - PlanePos + 2);
-            
-            // Find d=" within this tag
-            int32 DAttrPos = TagContent.Find(TEXT(" d=\""), ESearchCase::IgnoreCase);
-            if (DAttrPos == INDEX_NONE)
+            int32 NextNodeEnd = SceneContent.Find(TEXT("</Node>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, TagEnd);
+            if (NextNodeEnd != INDEX_NONE)
             {
-                SearchStart = TagEnd + 2;
-                continue;
-            }
-            
-            // Find the closing quote of d value
-            int32 DValueStart = DAttrPos + 4; // After ' d="'
-            int32 DValueEnd = TagContent.Find(TEXT("\""), ESearchCase::IgnoreCase, ESearchDir::FromStart, DValueStart);
-            if (DValueEnd == INDEX_NONE)
-            {
-                SearchStart = TagEnd + 2;
-                continue;
-            }
-            
-            // Build new tag with replaced d value
-            FString NewTag = TagContent.Left(DValueStart) + 
-                             FString::Printf(TEXT("%f"), DetectedFloor) + 
-                             TagContent.Mid(DValueEnd);
-            
-            // Replace in scene content
-            SceneContent = SceneContent.Left(PlanePos) + NewTag + SceneContent.Mid(TagEnd + 2);
-            bModified = true;
-            
-            UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Modified PlaneForceField d value to %f"), DetectedFloor);
-            
-            SearchStart = PlanePos + NewTag.Len();
-        }
-    }
-    else if (bFloorDetected)
-    {
-        // Only inject PlaneForceField if we actually detected a floor in Unreal
-        // Find each Node that has a TetrahedronFEMForceField or TriangularFEMForceField (physics nodes)
-        // and inject PlaneForceField into them
-        
-        FString PlaneForceFieldXml = FString::Printf(
-            TEXT("\n        <!-- Auto-injected floor by SofaUE5 (detected from Unreal floor mesh) -->\n")
-            TEXT("        <PlaneForceField normal=\"0 1 0\" d=\"%f\" stiffness=\"%f\" showPlane=\"0\"/>\n"),
-            DetectedFloor, FloorStiffness
-        );
-
-        // Find nodes with FEM force fields and add floor to them
-        TArray<FString> FEMPatterns = { TEXT("TetrahedronFEMForceField"), TEXT("TriangularFEMForceField") };
-        
-        for (const FString& Pattern : FEMPatterns)
-        {
-            int32 SearchStart = 0;
-            while (true)
-            {
-                int32 FEMPos = SceneContent.Find(Pattern, ESearchCase::IgnoreCase, ESearchDir::FromStart, SearchStart);
-                if (FEMPos == INDEX_NONE)
-                    break;
-                
-                // Find the closing tag of this line (/>)
-                int32 LineEnd = SceneContent.Find(TEXT("/>"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FEMPos);
-                if (LineEnd != INDEX_NONE)
+                FString NodeContent = SceneContent.Mid(TagEnd, NextNodeEnd - TagEnd);
+                if (!NodeContent.Contains(TEXT("UncoupledConstraintCorrection")))
                 {
-                    // Insert PlaneForceField after the FEM force field
-                    SceneContent.InsertAt(LineEnd + 2, PlaneForceFieldXml);
-                    bModified = true;
-                    UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Injected PlaneForceField after %s at d=%f"), *Pattern, DetectedFloor);
-                    SearchStart = LineEnd + 2 + PlaneForceFieldXml.Len();
-                }
-                else
-                {
-                    SearchStart = FEMPos + Pattern.Len();
+                    SceneContent.InsertAt(TagEnd + 2, TEXT("\n        <UncoupledConstraintCorrection />"));
                 }
             }
+            SearchPos = TagEnd + 50;
         }
     }
 
-    // Inject SofaCollisionMesh actors
     FString ContentWithCollisions = InjectCollisionMeshes(SceneContent);
     if (ContentWithCollisions != SceneContent)
     {
@@ -794,90 +730,309 @@ FString ASofaContext::ProcessSceneForFloor(const FString& OriginalPath)
     }
 
     if (!bModified)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] No modifications made to scene"));
         return OriginalPath;
-    }
 
-    // Save to a temporary file - use absolute path to avoid SOFA path resolution issues
-    // ProjectDir() is already absolute from earlier conversion
     FString TempDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) / TEXT("Saved") / TEXT("SofaTemp");
     IFileManager::Get().MakeDirectory(*TempDir, true);
     
     FString OriginalFilename = FPaths::GetCleanFilename(OriginalPath);
     FString TempPath = TempDir / (TEXT("processed_") + OriginalFilename);
-    
-    // Normalize path separators for SOFA (use forward slashes)
     TempPath.ReplaceCharInline('\\', '/');
     
-    UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] TempPath (absolute): %s"), *TempPath);
-    
     if (FFileHelper::SaveStringToFile(SceneContent, *TempPath))
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Saved processed scene to: %s"), *TempPath);
         return TempPath;
-    }
-    else
+    
+    return OriginalPath;
+}
+
+void ASofaContext::ClearSceneCache()
+{
+    FString TempDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) / TEXT("Saved") / TEXT("SofaTemp");
+    IFileManager& FileMan = IFileManager::Get();
+
+    if (!filePath.FilePath.IsEmpty())
     {
-        UE_LOG(LogTemp, Error, TEXT("[SOFA Floor] Failed to save processed scene"));
-        return OriginalPath;
+        FString ProcessedName = TEXT("processed_") + FPaths::GetCleanFilename(filePath.FilePath);
+        FString ProcessedPath = TempDir / ProcessedName;
+        ProcessedPath.ReplaceCharInline('\\', '/');
+        if (FileMan.Delete(*ProcessedPath))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[SOFA] Cleared processed scene cache: %s"), *ProcessedPath);
+        }
+        else if (FileMan.FileExists(*ProcessedPath))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[SOFA] Failed to delete processed scene: %s"), *ProcessedPath);
+        }
     }
+
+    FString ObjPath = TempDir / TEXT("floor_collision.obj");
+    ObjPath.ReplaceCharInline('\\', '/');
+    if (FileMan.Delete(*ObjPath))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SOFA] Cleared floor collision cache: %s"), *ObjPath);
+    }
+
+    CachedFloorObjPath.Empty();
+    CachedFloorLocation = FVector::ZeroVector;
+    UE_LOG(LogTemp, Warning, TEXT("[SOFA] Scene cache cleared. Next Play will regenerate processed scene and floor."));
 }
 
 FString ASofaContext::InjectCollisionMeshes(const FString& SceneContent)
 {
+    // TODO: Implement SofaCollisionMesh actor support for custom collision objects
+    return SceneContent;
+}
+
+FString ASofaContext::ExportFloorCollisionMesh()
+{
     UWorld* World = GetWorld();
     if (!World)
+        return FString();
+
+    FVector ContextLocation = GetActorLocation();
+    FVector ContextScale = GetActorScale3D();
+    
+    FString TempDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) / TEXT("Saved") / TEXT("SofaTemp");
+    FString ObjPath = TempDir / TEXT("floor_collision.obj");
+    ObjPath.ReplaceCharInline('\\', '/');
+    
+    bool bLocationChanged = FVector::DistSquared(ContextLocation, CachedFloorLocation) > 100.0f;
+    if (!CachedFloorObjPath.IsEmpty() && !bLocationChanged && FPaths::FileExists(ObjPath))
     {
-        return SceneContent;
+        UE_LOG(LogTemp, Log, TEXT("[SOFA] Using cached floor collision mesh"));
+        return CachedFloorObjPath;
     }
 
-    // Find all SofaCollisionMesh actors that reference this context
-    TArray<AActor*> CollisionActors;
-    UGameplayStatics::GetAllActorsOfClass(World, ASofaCollisionMesh::StaticClass(), CollisionActors);
-
-    if (CollisionActors.Num() == 0)
+    TArray<FVector> GridVertices;
+    TArray<int32> GridIndices;
+    
+    int32 GridResolution = FMath::Clamp(FloorGridDivisions, 2, 50);
+    float HalfRadius = FloorGridSize * 0.5f;
+    float CellSize = FloorGridSize / GridResolution;
+    
+    TArray<TArray<float>> HeightGrid;
+    HeightGrid.SetNum(GridResolution + 1);
+    for (int32 i = 0; i <= GridResolution; i++)
+        HeightGrid[i].SetNum(GridResolution + 1);
+    
+    TArray<TArray<bool>> ValidGrid;
+    ValidGrid.SetNum(GridResolution + 1);
+    for (int32 i = 0; i <= GridResolution; i++)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Collision] No SofaCollisionMesh actors found in scene"));
-        return SceneContent;
+        ValidGrid[i].SetNum(GridResolution + 1);
+        for (int32 j = 0; j <= GridResolution; j++)
+            ValidGrid[i][j] = false;
     }
-
-    FString CollisionXML;
-    int32 InjectedCount = 0;
-
-    for (AActor* Actor : CollisionActors)
+    
+    TArray<AActor*> LandscapeActors;
+    UGameplayStatics::GetAllActorsOfClass(World, ALandscapeProxy::StaticClass(), LandscapeActors);
+    UE_LOG(LogTemp, Warning, TEXT("[SOFA Floor] Found %d landscape actors"), LandscapeActors.Num());
+    
+    // Use only the landscape that contains the context (avoids mixing heights from multiple proxies / streaming).
+    // Heights come from landscape collision; for lumpy terrain to match the visible ground, set the landscape
+    // Collision Mip Level to 0 (Details > Collision) so collision uses the full-resolution heightmap.
+    ALandscapeProxy* PrimaryLandscape = nullptr;
+    FBox ContextBounds(ContextLocation - FVector(HalfRadius, HalfRadius, 0), ContextLocation + FVector(HalfRadius, HalfRadius, 0));
+    for (AActor* Actor : LandscapeActors)
     {
-        ASofaCollisionMesh* CollisionMesh = Cast<ASofaCollisionMesh>(Actor);
-        if (!CollisionMesh)
+        ALandscapeProxy* Landscape = Cast<ALandscapeProxy>(Actor);
+        if (!Landscape)
             continue;
-
-        // Check if this collision mesh references this context (or no context = use any)
-        if (CollisionMesh->SofaContextRef != nullptr && CollisionMesh->SofaContextRef != this)
-            continue;
-
-        FString MeshXML = CollisionMesh->GenerateSofaSceneXML();
-        if (!MeshXML.IsEmpty())
+        FBox LandscapeBounds = Landscape->GetComponentsBoundingBox();
+        bool bOverlap = (LandscapeBounds.Min.X <= ContextBounds.Max.X && LandscapeBounds.Max.X >= ContextBounds.Min.X &&
+                         LandscapeBounds.Min.Y <= ContextBounds.Max.Y && LandscapeBounds.Max.Y >= ContextBounds.Min.Y);
+        if (bOverlap)
         {
-            CollisionXML += MeshXML;
-            InjectedCount++;
-            UE_LOG(LogTemp, Warning, TEXT("[SOFA Collision] Generated collision XML for '%s'"), *CollisionMesh->GetName());
+            PrimaryLandscape = Landscape;
+            break;
         }
     }
-
-    if (CollisionXML.IsEmpty())
-    {
-        return SceneContent;
-    }
-
-    // Find the last </Node> (closing of root node) and insert before it
-    FString ModifiedContent = SceneContent;
-    int32 LastNodeClose = ModifiedContent.Find(TEXT("</Node>"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+    if (!PrimaryLandscape && LandscapeActors.Num() > 0)
+        PrimaryLandscape = Cast<ALandscapeProxy>(LandscapeActors[0]);
     
-    if (LastNodeClose != INDEX_NONE)
+    if (PrimaryLandscape)
     {
-        ModifiedContent.InsertAt(LastNodeClose, CollisionXML);
-        UE_LOG(LogTemp, Warning, TEXT("[SOFA Collision] Injected %d collision meshes into scene"), InjectedCount);
+        for (int32 GridY = 0; GridY <= GridResolution; GridY++)
+        {
+            for (int32 GridX = 0; GridX <= GridResolution; GridX++)
+            {
+                float WorldX = ContextLocation.X - HalfRadius + (GridX * CellSize);
+                float WorldY = ContextLocation.Y - HalfRadius + (GridY * CellSize);
+                
+                FVector Start(WorldX, WorldY, ContextLocation.Z + 10000.0f);
+                FVector End(WorldX, WorldY, ContextLocation.Z - 10000.0f);
+                
+                FHitResult Hit;
+                if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic))
+                {
+                    if (Hit.GetActor() == PrimaryLandscape)
+                    {
+                        HeightGrid[GridY][GridX] = Hit.Location.Z;
+                        ValidGrid[GridY][GridX] = true;
+                    }
+                }
+            }
+        }
+        UE_LOG(LogTemp, Log, TEXT("[SOFA] Sampled landscape '%s' (heightmap from collision)"), *PrimaryLandscape->GetName());
     }
+    
+    TArray<AActor*> StaticMeshActors;
+    UGameplayStatics::GetAllActorsOfClass(World, AStaticMeshActor::StaticClass(), StaticMeshActors);
+    
+    for (AActor* Actor : StaticMeshActors)
+    {
+        UStaticMeshComponent* MeshComp = Cast<AStaticMeshActor>(Actor) ? Cast<AStaticMeshActor>(Actor)->GetStaticMeshComponent() : nullptr;
+        if (!IsActorFloor(Actor, MeshComp))
+            continue;
+            
+        for (int32 GridY = 0; GridY <= GridResolution; GridY++)
+        {
+            for (int32 GridX = 0; GridX <= GridResolution; GridX++)
+            {
+                if (ValidGrid[GridY][GridX])
+                    continue;
+                    
+                float WorldX = ContextLocation.X - HalfRadius + (GridX * CellSize);
+                float WorldY = ContextLocation.Y - HalfRadius + (GridY * CellSize);
+                
+                FVector Start(WorldX, WorldY, ContextLocation.Z + 10000.0f);
+                FVector End(WorldX, WorldY, ContextLocation.Z - 10000.0f);
+                
+                FHitResult Hit;
+                if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic))
+                {
+                    if (Hit.GetActor() == Actor)
+                    {
+                        HeightGrid[GridY][GridX] = Hit.Location.Z;
+                        ValidGrid[GridY][GridX] = true;
+                    }
+                }
+            }
+        }
+        
+        UE_LOG(LogTemp, Log, TEXT("[SOFA] Sampled floor mesh '%s'"), *Actor->GetName());
+    }
+    
+    for (int32 GridY = 0; GridY <= GridResolution; GridY++)
+    {
+        for (int32 GridX = 0; GridX <= GridResolution; GridX++)
+        {
+            if (!ValidGrid[GridY][GridX])
+            {
+                float Sum = 0.0f;
+                int32 Count = 0;
+                for (int32 dy = -1; dy <= 1; dy++)
+                {
+                    for (int32 dx = -1; dx <= 1; dx++)
+                    {
+                        int32 nx = GridX + dx;
+                        int32 ny = GridY + dy;
+                        if (nx >= 0 && nx <= GridResolution && ny >= 0 && ny <= GridResolution && ValidGrid[ny][nx])
+                        {
+                            Sum += HeightGrid[ny][nx];
+                            Count++;
+                        }
+                    }
+                }
+                if (Count > 0)
+                {
+                    HeightGrid[GridY][GridX] = Sum / Count;
+                    ValidGrid[GridY][GridX] = true;
+                }
+            }
+        }
+    }
+    
+    TMap<TPair<int32, int32>, int32> GridToVertexIndex;
+    
+    for (int32 GridY = 0; GridY <= GridResolution; GridY++)
+    {
+        for (int32 GridX = 0; GridX <= GridResolution; GridX++)
+        {
+            if (ValidGrid[GridY][GridX])
+            {
+                float WorldX = ContextLocation.X - HalfRadius + (GridX * CellSize);
+                float WorldY = ContextLocation.Y - HalfRadius + (GridY * CellSize);
+                float WorldZ = HeightGrid[GridY][GridX];
+                
+                GridToVertexIndex.Add(TPair<int32, int32>(GridX, GridY), GridVertices.Num());
+                GridVertices.Add(FVector(WorldX, WorldY, WorldZ));
+            }
+        }
+    }
+    
+    for (int32 GridY = 0; GridY < GridResolution; GridY++)
+    {
+        for (int32 GridX = 0; GridX < GridResolution; GridX++)
+        {
+            bool bHas00 = ValidGrid[GridY][GridX];
+            bool bHas10 = ValidGrid[GridY][GridX + 1];
+            bool bHas01 = ValidGrid[GridY + 1][GridX];
+            bool bHas11 = ValidGrid[GridY + 1][GridX + 1];
+            
+            if (bHas00 && bHas10 && bHas01)
+            {
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX, GridY)]);
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX + 1, GridY)]);
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX, GridY + 1)]);
+            }
+            
+            if (bHas10 && bHas11 && bHas01)
+            {
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX + 1, GridY)]);
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX + 1, GridY + 1)]);
+                GridIndices.Add(GridToVertexIndex[TPair<int32, int32>(GridX, GridY + 1)]);
+            }
+        }
+    }
+    
+    if (GridVertices.Num() < 3 || GridIndices.Num() < 3)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SOFA] No floor geometry found within radius"));
+        return FString();
+    }
+    
+    FString ObjContent;
+    for (const FVector& Vertex : GridVertices)
+    {
+        FVector RelativePos = Vertex - ContextLocation;
+        float SofaX = RelativePos.X / FMath::Abs(ContextScale.X);
+        float SofaY = RelativePos.Z / FMath::Abs(ContextScale.Z);
+        float SofaZ = -RelativePos.Y / FMath::Abs(ContextScale.Y);
+        ObjContent += FString::Printf(TEXT("v %f %f %f\n"), SofaX, SofaY, SofaZ);
+    }
+    
+    for (int32 i = 0; i < GridIndices.Num(); i += 3)
+    {
+        ObjContent += FString::Printf(TEXT("f %d %d %d\n"), 
+            GridIndices[i] + 1, GridIndices[i + 1] + 1, GridIndices[i + 2] + 1);
+    }
+    
+    IFileManager::Get().MakeDirectory(*TempDir, true);
+    
+    if (FFileHelper::SaveStringToFile(ObjContent, *ObjPath))
+    {
+        CachedFloorObjPath = ObjPath;
+        CachedFloorLocation = ContextLocation;
+        UE_LOG(LogTemp, Log, TEXT("[SOFA] Exported floor: %d verts, %d tris"), 
+            GridVertices.Num(), GridIndices.Num() / 3);
+        return ObjPath;
+    }
+    
+    return FString();
+}
 
-    return ModifiedContent;
+FString ASofaContext::GenerateFloorMeshCollisionXML(const FString& ObjFilePath)
+{
+    if (ObjFilePath.IsEmpty())
+        return FString();
+
+    FString XML = TEXT("\n    <Node name=\"FloorCollision\">\n");
+    XML += FString::Printf(TEXT("        <MeshOBJLoader name=\"floorLoader\" filename=\"%s\" />\n"), *ObjFilePath);
+    XML += TEXT("        <MeshTopology src=\"@floorLoader\" />\n");
+    XML += TEXT("        <MechanicalObject src=\"@floorLoader\" name=\"FloorCollisModel\" />\n");
+    XML += TEXT("        <TriangleCollisionModel simulated=\"false\" moving=\"false\" contactStiffness=\"800\" />\n");
+    XML += TEXT("        <OglModel name=\"FloorVisual\" src=\"@floorLoader\" color=\"0.3 0.6 0.3 0.5\" />\n");
+    XML += TEXT("    </Node>\n");
+    return XML;
 }
